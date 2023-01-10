@@ -4,8 +4,6 @@ use secrecy::{ExposeSecret, Secret};
 use sqlx::{postgres::{PgConnectOptions, PgSslMode}};
 use url::Url;
 
-use crate::{tracker_client::TrackerClient, utils::is_valid_websocket_url};
-
 // use crate::{email_client::EmailClient, domain::UserEmail};
 
 pub enum Environment {
