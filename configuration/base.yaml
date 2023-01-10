@@ -1,0 +1,10 @@
+database:
+  host: "127.0.0.1"
+  port: 5432
+  username: "postgres"
+  password: "password"
+  database_name: "tracker"
+  require_ssl: false
+tracker:
+  url: "wss://frosty-attentive-snowflake.discover.quiknode.pro/e626852e1fd4897d8f62a01536f23f7fcf99c67f/"
+  abi_file_location: "./src/constants"

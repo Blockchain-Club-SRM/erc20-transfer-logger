@@ -1,0 +1,28 @@
+[package]
+name = "erc20-transfer-tracker"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+name = "server"
+
+
+[[bin]]
+name = "erc20-tracker"
+path = "src/main.rs"
+
+
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+thiserror = "1.0.38"
+anyhow = "1.0.68"
+serde = { version = "1", features = ["derive"] }
+config = "0.13.3"
+serde_json = "1.0.91"
+sqlx = { version = "0.6", default-features = false, features = ["runtime-actix-rustls", "macros", "postgres", "uuid", "chrono", "migrate", "offline"] }
+serde-aux = "4.1.2"
+secrecy = { version = "0.8.0", features = ["serde"] }
+ethers = { version = "1.0.0", features = ["rustls", "ws"] }
+url = "2.3.1"
