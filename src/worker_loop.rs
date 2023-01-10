@@ -6,35 +6,28 @@ use ethers::{
     utils::format_units,
 };
 use sqlx::{PgPool, Postgres, Transaction};
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::{
     configuration::Settings, constants::IERC20, startup::get_connection_pool,
     tracker_client::TrackerClient,
 };
-// type PgTransaction = Transaction<'static, Postgres>;
-// pub struct ParsedTransactionData {
-//     symbol: String,
-//     amount: String,
-//     from_address: String,
-//     to_address: String,
-//     block_number: U64,
-//     transaction_hash: String,
-// }
+
 pub async fn run_worker_until_stopped(configuration: Settings) -> Result<(), anyhow::Error> {
     let connection_pool = get_connection_pool(&configuration.database);
     let tracker_client = TrackerClient::new(configuration.tracker.url).await;
-    worker_loop(&connection_pool, tracker_client).await
+    let mut token_data: HashMap<String, (String, i32)> = HashMap::new();
+    worker_loop(&connection_pool, tracker_client, &mut token_data).await
 }
 
 async fn worker_loop(
     connection_pool: &PgPool,
     tracker_client: TrackerClient,
+    token_data: &mut HashMap<String, (String, i32)>,
 ) -> Result<(), anyhow::Error> {
     let mut last_block = get_last_block(connection_pool, tracker_client.client.clone()).await?;
-    println!("next block: {}", last_block);
     loop {
-        match try_execute_task(connection_pool, tracker_client.client.clone(), &last_block).await {
+        match try_execute_task(connection_pool, tracker_client.client.clone(), &last_block, token_data).await {
             Ok(ExecutionOutcome::EmptyQueue) => {
                 println!("Emtpy Queue");
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -44,6 +37,7 @@ async fn worker_loop(
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
             Ok(ExecutionOutcome::TaskCompleted) => {
+                println!("hey");
                 last_block = last_block + 1;
             }
         }
@@ -58,41 +52,52 @@ pub async fn try_execute_task(
     pool: &PgPool,
     client: Arc<Provider<Ws>>,
     last_block: &U64,
+    token_data: &mut HashMap<String, (String, i32)>,
 ) -> Result<ExecutionOutcome, anyhow::Error> {
+    println!("next block: {}", &last_block);
     let erc20_transfer_filter = Filter::new()
         .from_block(last_block)
         .event("Transfer(address,address,uint256)");
     let mut batch: Vec<(String, String, String, String, U64, String)> = vec![];
-
-    let mut stream = client.get_logs_paginated(&erc20_transfer_filter, 100);
+    let mut stream = client.get_logs_paginated(&erc20_transfer_filter, 10);
     while let Some(res) = stream.next().await {
         if let Ok(log) = res {
             if check_valid_erc20_transaction(&log) {
-                let contract = get_contract(log.address, client.clone());
-                let symbol = get_symbol(&contract).await;
-                let decimals = get_decimal(&contract).await;
+                let data = token_data.get(&log.address.to_string());
+                let (symbol, decimals) = match data {
+                    Some((a, b)) => (a.clone(), b.clone()),
+                    None => {
+                        let contract = get_contract(log.address, client.clone());
+                        let symbol = get_symbol(&contract).await;
+                        let decimals = get_decimal(&contract).await;
+                        token_data.insert(log.address.to_string(), (symbol.clone(), decimals));
+                        (symbol, decimals)
+                    }
+                };
                 let amount = get_readable_amount(&log, decimals).await;
                 let from = get_address(log.topics[1]);
                 let to = get_address(log.topics[2]);
-                let block_number = log.block_number.unwrap();
-                let transaction_hash = log.transaction_hash.unwrap().to_string();
-                add_unique_transaction_to_batch(
-                    (amount, symbol, from, to, block_number, transaction_hash),
-                    &mut batch,
-                );
+                if let Some(block_number) = log.block_number {
+                    let block_number = block_number;
+                    if let Some(transaction_hash) = log.transaction_hash {
+                        let transaction_hash = transaction_hash.to_string();
+                        batch.push((amount, symbol, from, to, block_number, transaction_hash));
+                    }
+                }
+                println!("in batch {} ", batch.len().to_string());
             }
         }
     }
     if batch.is_empty() {
         return Ok(ExecutionOutcome::EmptyQueue);
     }
-    println!("Batch Size: {}", batch.len());
     let mut transaction = pool.begin().await.context("Begin Error")?;
     insert_batch_erc20_transaction_data(&mut transaction, &batch).await?;
-    save_last_block(&mut transaction, batch.last().unwrap().4)
+    save_last_block(&mut transaction, last_block.clone())
         .await
         .context("Insert Last Block Error")?;
     transaction.commit().await.context("Commit Error")?;
+    println!("done");
     Ok(ExecutionOutcome::TaskCompleted)
 }
 
@@ -216,19 +221,19 @@ pub async fn insert_batch_erc20_transaction_data(
     Ok(())
 }
 
-pub fn add_unique_transaction_to_batch(
-    data: (String, String, String, String, U64, String),
-    batch: &mut Vec<(String, String, String, String, U64, String)>,
-) -> &mut Vec<(String, String, String, String, U64, String)> {
-    let mut is_exist = false;
-    for d in batch.iter() {
-        if d.5 == data.5 {
-            is_exist = true;
-            break;
-        }
-    }
-    if !is_exist {
-        batch.push(data);
-    }
-    batch
-}
+// pub fn add_unique_transaction_to_batch(
+//     data: (String, String, String, String, U64, String),
+//     batch: &mut Vec<(String, String, String, String, U64, String)>,
+// ) -> &mut Vec<(String, String, String, String, U64, String)> {
+//     let mut is_exist = false;
+//     for d in batch.iter() {
+//         if d.5 == data.5 {
+//             is_exist = true;
+//             break;
+//         }
+//     }
+//     if !is_exist {
+//         batch.push(data);
+//     }
+//     batch
+// }

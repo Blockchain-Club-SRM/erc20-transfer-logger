@@ -6,5 +6,5 @@ database:
   database_name: "tracker"
   require_ssl: false
 tracker:
-  url: "wss://frosty-attentive-snowflake.discover.quiknode.pro/e626852e1fd4897d8f62a01536f23f7fcf99c67f/"
+  url: "wss://mainnet.infura.io/ws/v3/5d158c71773c4d869a97405bef38704f"
   abi_file_location: "./src/constants"
