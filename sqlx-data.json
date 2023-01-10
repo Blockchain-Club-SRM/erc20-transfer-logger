@@ -1,0 +1,42 @@
+{
+  "db": "PostgreSQL",
+  "500a713e8b6b7b5562d6fe92b77f9be13bf6a3b8116c56e80ca3a013f8896dbf": {
+    "describe": {
+      "columns": [
+        {
+          "name": "name",
+          "ordinal": 0,
+          "type_info": "Text"
+        },
+        {
+          "name": "block_number",
+          "ordinal": 1,
+          "type_info": "Int4"
+        }
+      ],
+      "nullable": [
+        false,
+        true
+      ],
+      "parameters": {
+        "Left": [
+          "Text"
+        ]
+      }
+    },
+    "query": "\n            SELECT * FROM tracker_state\n            where name = $1"
+  },
+  "5e00c77341337b4345bf1601b47ea11ed8dbacb1b7d555d90ae5a89953e7f1b9": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Text",
+          "Int4"
+        ]
+      }
+    },
+    "query": "\n            INSERT INTO tracker_state (name, block_number)\n            VALUES ($1, $2)\n            ON CONFLICT (name) DO UPDATE SET block_number = $2"
+  }
+}

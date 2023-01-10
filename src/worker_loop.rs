@@ -1,4 +1,3 @@
-use std::{ sync::Arc, time::Duration};
 use anyhow::Context;
 use ethers::{
     abi::AbiDecode,
@@ -7,20 +6,21 @@ use ethers::{
     utils::format_units,
 };
 use sqlx::{PgPool, Postgres, Transaction};
+use std::{sync::Arc, time::Duration};
 
 use crate::{
     configuration::Settings, constants::IERC20, startup::get_connection_pool,
     tracker_client::TrackerClient,
 };
 // type PgTransaction = Transaction<'static, Postgres>;
-struct ParsedTransactionData {
-    symbol: String,
-    amount: String,
-    from_address: String,
-    to_address: String,
-    block_number: U64,
-    transaction_hash: String,
-}
+// pub struct ParsedTransactionData {
+//     symbol: String,
+//     amount: String,
+//     from_address: String,
+//     to_address: String,
+//     block_number: U64,
+//     transaction_hash: String,
+// }
 pub async fn run_worker_until_stopped(configuration: Settings) -> Result<(), anyhow::Error> {
     let connection_pool = get_connection_pool(&configuration.database);
     let tracker_client = TrackerClient::new(configuration.tracker.url).await;
@@ -34,9 +34,7 @@ async fn worker_loop(
     let mut last_block = get_last_block(connection_pool, tracker_client.client.clone()).await?;
     println!("next block: {}", last_block);
     loop {
-        match try_execute_task(connection_pool, tracker_client.client.clone(), &last_block)
-            .await
-        {
+        match try_execute_task(connection_pool, tracker_client.client.clone(), &last_block).await {
             Ok(ExecutionOutcome::EmptyQueue) => {
                 println!("Emtpy Queue");
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -46,7 +44,7 @@ async fn worker_loop(
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
             Ok(ExecutionOutcome::TaskCompleted) => {
-                last_block= last_block + 1;
+                last_block = last_block + 1;
             }
         }
     }
@@ -64,40 +62,38 @@ pub async fn try_execute_task(
     let erc20_transfer_filter = Filter::new()
         .from_block(last_block)
         .event("Transfer(address,address,uint256)");
-        let mut batch: Vec<ParsedTransactionData> = vec![];
+    let mut batch: Vec<(String, String, String, String, U64, String)> = vec![];
 
-        let mut stream = client.get_logs_paginated(&erc20_transfer_filter, 100);
-        while let Some(res) = stream.next().await {
-            if let Ok(log) = res {
-                if check_valid_erc20_transaction(&log) {
-                    let contract = get_contract(log.address, client.clone());
-                    let symbol = get_symbol(&contract).await;
-                    let decimals = get_decimal(&contract).await;
-                    let amount = get_readable_amount(&log, decimals).await;
-                    let from = get_address(log.topics[1]);
-                    let to = get_address(log.topics[2]);
-                    let block_number = log.block_number.unwrap();
-                    let transaction_hash = log.transaction_hash.unwrap().to_string();
-                    batch.push(ParsedTransactionData {
-                        symbol,
-                        amount,
-                        from_address: from,
-                        to_address: to,
-                        block_number,
-                        transaction_hash,
-                    });
-                }
+    let mut stream = client.get_logs_paginated(&erc20_transfer_filter, 100);
+    while let Some(res) = stream.next().await {
+        if let Ok(log) = res {
+            if check_valid_erc20_transaction(&log) {
+                let contract = get_contract(log.address, client.clone());
+                let symbol = get_symbol(&contract).await;
+                let decimals = get_decimal(&contract).await;
+                let amount = get_readable_amount(&log, decimals).await;
+                let from = get_address(log.topics[1]);
+                let to = get_address(log.topics[2]);
+                let block_number = log.block_number.unwrap();
+                let transaction_hash = log.transaction_hash.unwrap().to_string();
+                add_unique_transaction_to_batch(
+                    (amount, symbol, from, to, block_number, transaction_hash),
+                    &mut batch,
+                );
             }
         }
-        if batch.is_empty() {
-            return Ok(ExecutionOutcome::EmptyQueue);
-        }
-        println!("Batch Size: {}", batch.len());
-        let mut transaction = pool.begin().await.context("Begin Error")?;
-        insert_batch_erc20_transaction_data(&mut transaction, &batch).await?;
-        save_last_block(&mut transaction, batch.last().unwrap().block_number).await.context("Insert Last Block Error")?;
-        transaction.commit().await.context("Commit Error")?;
-        Ok(ExecutionOutcome::TaskCompleted)
+    }
+    if batch.is_empty() {
+        return Ok(ExecutionOutcome::EmptyQueue);
+    }
+    println!("Batch Size: {}", batch.len());
+    let mut transaction = pool.begin().await.context("Begin Error")?;
+    insert_batch_erc20_transaction_data(&mut transaction, &batch).await?;
+    save_last_block(&mut transaction, batch.last().unwrap().4)
+        .await
+        .context("Insert Last Block Error")?;
+    transaction.commit().await.context("Commit Error")?;
+    Ok(ExecutionOutcome::TaskCompleted)
 }
 
 pub async fn get_last_block(
@@ -183,34 +179,56 @@ pub fn check_valid_erc20_transaction(log: &Log) -> bool {
     }
 }
 
-async fn insert_batch_erc20_transaction_data(
+pub async fn insert_batch_erc20_transaction_data(
     transaction: &mut Transaction<'_, Postgres>,
-    data: &Vec<ParsedTransactionData>,
+    data: &Vec<(String, String, String, String, U64, String)>,
 ) -> Result<(), anyhow::Error> {
-    let mut values = String::new();
-    for (i, d) in data.iter().enumerate() {
-        values.push_str(&format!(
-            "({}, {}, {}, {}, {}, {})",
-            d.amount,
-            d.symbol,
-            d.from_address,
-            d.to_address,
-            U64::as_u64(&d.block_number) as i32,
-            d.transaction_hash
-        ));
-        if i != data.len() - 1 {
-            values.push_str(",");
-        }
+    let mut v1: Vec<String> = Vec::new();
+    let mut v2: Vec<String> = Vec::new();
+    let mut v3: Vec<String> = Vec::new();
+    let mut v4: Vec<String> = Vec::new();
+    let mut v5: Vec<i32> = Vec::new();
+    let mut v6: Vec<String> = Vec::new();
+    for d in data.iter() {
+        v1.push(d.0.to_string());
+        v2.push(d.1.to_string());
+        v3.push(d.2.to_string());
+        v4.push(d.3.to_string());
+        v5.push(U64::as_u64(&d.4) as i32);
+        v6.push(d.5.to_string());
     }
-    dbg!(&values);
+    println!("v1: {}", v1.len());
     sqlx::query(
         r#"
-        INSERT INTO erc20_transaction_data (value, symbol, from_address, to_address, block_number, transaction_hash)
-        VALUES
-        "#,
+        INSERT INTO erc20_transaction_logs (value, symbol, from_address, to_address, block_number, transaction_hash)
+        SELECT * FROM UNNEST($1, $2, $3, $4, $5, $6)
+        ON CONFLICT
+        DO NOTHING"#,
     )
-    .bind(&values)
+    .bind(&v1)
+    .bind(&v2)
+    .bind(&v3)
+    .bind(&v4)
+    .bind(&v5)
+    .bind(&v6)
     .execute(transaction)
     .await.map_err(|e| anyhow::anyhow!(e))?;
     Ok(())
+}
+
+pub fn add_unique_transaction_to_batch(
+    data: (String, String, String, String, U64, String),
+    batch: &mut Vec<(String, String, String, String, U64, String)>,
+) -> &mut Vec<(String, String, String, String, U64, String)> {
+    let mut is_exist = false;
+    for d in batch.iter() {
+        if d.5 == data.5 {
+            is_exist = true;
+            break;
+        }
+    }
+    if !is_exist {
+        batch.push(data);
+    }
+    batch
 }
