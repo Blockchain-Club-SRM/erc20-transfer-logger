@@ -2,7 +2,7 @@ use anyhow::Context;
 use ethers::{
     abi::AbiDecode,
     providers::{Middleware, Provider, StreamExt, Ws},
-    types::{Address, Filter, Log, H160, H256, U256, U64, Bytes},
+    types::{Address, Filter, Log, H256, U256, U64, Bytes},
     utils::format_units,
 };
 use sqlx::{PgPool, Postgres, Transaction};
@@ -16,14 +16,14 @@ use crate::{
 pub async fn run_worker_until_stopped(configuration: Settings) -> Result<(), anyhow::Error> {
     let connection_pool = get_connection_pool(&configuration.database);
     let tracker_client = TrackerClient::new(configuration.tracker.url).await;
-    let mut token_data: HashMap<String, (String, i32)> = HashMap::new();
+    let mut token_data: HashMap<Address, (String, u8)> = HashMap::new();
     worker_loop(&connection_pool, tracker_client, &mut token_data).await
 }
 
 async fn worker_loop(
     connection_pool: &PgPool,
     tracker_client: TrackerClient,
-    token_data: &mut HashMap<String, (String, i32)>,
+    token_data: &mut HashMap<Address, (String, u8)>,
 ) -> Result<(), anyhow::Error> {
     let mut last_block = get_last_block(connection_pool, tracker_client.client.clone()).await?;
     loop {
@@ -52,36 +52,35 @@ pub async fn try_execute_task(
     pool: &PgPool,
     client: Arc<Provider<Ws>>,
     last_block: &U64,
-    token_data: &mut HashMap<String, (String, i32)>,
+    token_data: &mut HashMap<Address, (String, u8)>,
 ) -> Result<ExecutionOutcome, anyhow::Error> {
     println!("next block: {}", &last_block);
     let erc20_transfer_filter = Filter::new()
         .from_block(last_block)
         .event("Transfer(address,address,uint256)");
-    let mut batch: Vec<(String, String, String, String, U64, String)> = vec![];
+    let mut batch: Vec<(String, String, Address, Address, U64, H256)> = vec![];
     let mut stream = client.get_logs_paginated(&erc20_transfer_filter, 10);
     while let Some(res) = stream.next().await {
         if let Ok(log) = res {
             if check_valid_erc20_transaction(&log) {
-                let data = token_data.get(&H160::to_string(&log.address));
+                let data = token_data.get(&log.address);
                 let (symbol, decimals) = match data {
                     Some((a, b)) => (a.clone(), b.clone()),
                     None => {
                         let contract = get_contract(log.address, client.clone());
                         let symbol = get_symbol(&contract).await;
                         let decimals = get_decimal(&contract).await;
-                        token_data.insert(H160::to_string(&log.address), (symbol.clone(), decimals));
+                        token_data.insert(log.address, (symbol.clone(), decimals.clone()));
                         (symbol, decimals)
                     }
                 };
-                let amount = get_readable_amount(&log, decimals).await;
+                let amount = get_readable_amount(&log, &decimals).await;
                 let from = get_address(log.topics[1]);
                 let to = get_address(log.topics[2]);
                 if let Some(block_number) = log.block_number {
                     let block_number = block_number;
                     if let Some(transaction_hash) = log.transaction_hash {
-                        let transaction_hash = H256::to_string(&transaction_hash);
-                        batch.push((amount, symbol, from, to, block_number, transaction_hash));
+                        batch.push((amount, symbol.clone(), from, to, block_number, transaction_hash));
                     }
                 }
                 println!("Block {} Transaction's in Batch {} ", last_block, batch.len().to_string());
@@ -135,13 +134,13 @@ pub async fn save_last_block(
             VALUES ($1, $2)
             ON CONFLICT (name) DO UPDATE SET block_number = $2"#,
         "erc20",
-        U64::as_u64(block_number) as i32,
+        U64::as_u64(block_number) as i32
     )
     .execute(transaction)
     .await?;
     Ok(())
 }
-pub fn get_contract(address: H160, client: Arc<Provider<Ws>>) -> IERC20<Provider<Ws>> {
+pub fn get_contract(address: Address, client: Arc<Provider<Ws>>) -> IERC20<Provider<Ws>> {
     IERC20::new(address, client.clone())
 }
 
@@ -152,16 +151,16 @@ pub async fn get_symbol(contract: &IERC20<Provider<Ws>>) -> String {
     }
 }
 
-pub async fn get_decimal(contract: &IERC20<Provider<Ws>>) -> i32 {
+pub async fn get_decimal(contract: &IERC20<Provider<Ws>>) -> u8 {
     match contract.decimals().call().await {
-        Ok(decimal) => decimal as i32,
-        Err(_) => 1,
+        Ok(decimal) => decimal,
+        Err(_) => 1u8,
     }
 }
 
-pub async fn get_readable_amount(log: &Log, decimals: i32) -> String {
+pub async fn get_readable_amount(log: &Log, decimals: &u8) -> String {
     if let Ok(amount) = U256::decode(&log.data) {
-        if let Ok(readable_amount) = format_units(amount, decimals) {
+        if let Ok(readable_amount) = format_units(amount, decimals.clone() as i32) {
             return readable_amount;
         } else {
             return U256::to_string(&amount);
@@ -171,8 +170,8 @@ pub async fn get_readable_amount(log: &Log, decimals: i32) -> String {
     }
 }
 
-pub fn get_address(address: H256) -> String {
-    H160::to_string(&Address::from(address))
+pub fn get_address(address: H256) -> Address {
+    Address::from(address)
 }
 
 pub fn check_valid_erc20_transaction(log: &Log) -> bool {
@@ -181,23 +180,22 @@ pub fn check_valid_erc20_transaction(log: &Log) -> bool {
 
 pub async fn insert_batch_erc20_transaction_data(
     transaction: &mut Transaction<'_, Postgres>,
-    data: &Vec<(String, String, String, String, U64, String)>,
+    data: &Vec<(String, String, Address, Address, U64, H256)>,
     last_block: &U64,
 ) -> Result<(), anyhow::Error> {
-    let block_number= U64::as_u64(last_block) as i32;
     let mut v1: Vec<String> = Vec::new();
     let mut v2: Vec<String> = Vec::new();
-    let mut v3: Vec<String> = Vec::new();
-    let mut v4: Vec<String> = Vec::new();
+    let mut v3: Vec<_> = Vec::new();
+    let mut v4: Vec<_> = Vec::new();
     let mut v5: Vec<i32> = Vec::new();
-    let mut v6: Vec<String> = Vec::new();
+    let mut v6: Vec<_> = Vec::new();
     for d in data.iter() {
         v1.push(d.0.to_string());
         v2.push(d.1.to_string());
-        v3.push(d.2.to_string());
-        v4.push(d.3.to_string());
-        v5.push(block_number);
-        v6.push(d.5.to_string());
+        v3.push(d.2.as_bytes());
+        v4.push(d.3.as_bytes());
+        v5.push(U64::as_u64(last_block) as i32);
+        v6.push(d.5.as_bytes());
     }
     println!("v1: {}", v1.len());
     sqlx::query(
