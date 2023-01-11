@@ -1,9 +1,9 @@
 use anyhow::Context;
 use ethers::{
-    abi::AbiDecode,
+    abi::{AbiDecode, AbiEncode},
     providers::{Middleware, Provider, StreamExt, Ws},
     types::{Address, Filter, Log, H256, U256, U64},
-    utils::format_units,
+    utils::{format_units},
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -65,7 +65,7 @@ pub async fn try_execute_task(
     let erc20_transfer_filter = Filter::new()
         .from_block(last_block)
         .event("Transfer(address,address,uint256)");
-    let mut batch: Vec<(String, String, Address, Address, U64, H256)> = vec![];
+    let mut batch: Vec<(f64, String, Address, Address, U64, H256)> = vec![];
     let mut stream = client.get_logs_paginated(&erc20_transfer_filter, 10);
     while let Some(res) = stream.next().await {
         if let Ok(log) = res {
@@ -84,7 +84,7 @@ pub async fn try_execute_task(
                         (symbol, decimals)
                     }
                 };
-                let amount = get_readable_amount(&log, &decimals).await.map_err(|e| anyhow::anyhow!(e))?;
+                let amount = get_readable_amount(&log, &decimals).await;
                 let from = get_address(log.topics[1]);
                 let to = get_address(log.topics[2]);
                 if let Some(block_number) = log.block_number {
@@ -92,14 +92,14 @@ pub async fn try_execute_task(
                     if let Some(transaction_hash) = log.transaction_hash {
                         batch.push((
                             amount,
-                            symbol.clone(),
+                            symbol,
                             from,
                             to,
                             block_number,
                             transaction_hash,
                         ));
                         println!(
-                            "Block {} Transaction's in Batch {} ",
+                            "Block {} Transaction's in Batch {}",
                             block_number,
                             batch.len().to_string()
                         );
@@ -150,8 +150,8 @@ pub async fn save_last_block(
 ) -> Result<(), anyhow::Error> {
     sqlx::query!(
         r#"
-            INSERT INTO tracker_state (name, block_number)
-            VALUES ($1, $2)
+            INSERT INTO tracker_state (name, block_number, updated_at)
+            VALUES ($1, $2, now())
             ON CONFLICT (name) DO UPDATE SET block_number = $2"#,
         "erc20",
         U64::as_u64(block_number) as i32
@@ -178,16 +178,11 @@ pub async fn get_decimal(contract: &IERC20<Provider<Ws>>) -> u8 {
     }
 }
 
-pub async fn get_readable_amount(log: &Log, decimals: &u8) -> Result<String, String> {
-    if let Ok(amount) = U256::decode(&log.data) {
-        if let Ok(readable_amount) = format_units(amount, decimals.clone() as i32) {
-            return Ok(readable_amount);
-        } else {
-            return Ok(U256::to_string(&amount));
-        }
-    } else {
-        Err("Error decoding amount".to_owned())
-    }
+pub async fn get_readable_amount(log: &Log, decimals: &u8) -> f64 {
+    let amount = U256::decode(&log.data).unwrap();
+    let value = format_units(amount, decimals.clone() as i32);
+    value.unwrap().parse::<f64>().unwrap()
+
 }
 
 pub fn get_address(address: H256) -> Address {
@@ -200,21 +195,22 @@ pub fn check_valid_erc20_transaction(log: &Log) -> bool {
 
 pub async fn insert_batch_erc20_transaction_data(
     transaction: &mut Transaction<'_, Postgres>,
-    data: &Vec<(String, String, Address, Address, U64, H256)>,
+    data: &Vec<(f64, String, Address, Address, U64, H256)>,
 ) -> Result<(), anyhow::Error> {
-    let mut v1: Vec<String> = Vec::new();
+    let mut v1: Vec<_> = Vec::new();
     let mut v2: Vec<String> = Vec::new();
     let mut v3: Vec<_> = Vec::new();
     let mut v4: Vec<_> = Vec::new();
     let mut v5: Vec<i32> = Vec::new();
     let mut v6: Vec<_> = Vec::new();
     for d in data.iter() {
-        v1.push(d.0.to_string());
+        v1.push(d.0);
         v2.push(d.1.to_string());
-        v3.push(d.2.as_bytes());
-        v4.push(d.3.as_bytes());
+        v3.push(d.2.encode_hex());
+        v4.push(d.3.encode_hex());
         v5.push(U64::as_u64(&d.4) as i32);
-        v6.push(d.5.as_bytes());
+        
+        v6.push(d.5.encode_hex());
     }
     println!("v1: {}", v1.len());
     sqlx::query(
