@@ -61,7 +61,7 @@ pub async fn try_execute_task(
     last_block: &U64,
     token_data: &mut HashMap<Address, (String, u8)>,
 ) -> Result<ExecutionOutcome, anyhow::Error> {
-    println!("next block: {}", &last_block);
+    println!("Scanning block: {}", &last_block);
     let erc20_transfer_filter = Filter::new()
         .from_block(last_block)
         .event("Transfer(address,address,uint256)");
@@ -198,21 +198,20 @@ pub async fn insert_batch_erc20_transaction_data(
     data: &Vec<(f64, String, Address, Address, U64, H256)>,
 ) -> Result<(), anyhow::Error> {
     let mut v1: Vec<_> = Vec::new();
-    let mut v2: Vec<String> = Vec::new();
+    let mut v2: Vec<_> = Vec::new();
     let mut v3: Vec<_> = Vec::new();
     let mut v4: Vec<_> = Vec::new();
     let mut v5: Vec<i32> = Vec::new();
     let mut v6: Vec<_> = Vec::new();
     for d in data.iter() {
         v1.push(d.0);
-        v2.push(d.1.to_string());
+        v2.push(d.1.as_bytes());
         v3.push(d.2.encode_hex());
         v4.push(d.3.encode_hex());
         v5.push(U64::as_u64(&d.4) as i32);
-        
         v6.push(d.5.encode_hex());
     }
-    println!("v1: {}", v1.len());
+    println!("Inserting: {} logs", v1.len());
     sqlx::query(
         r#"
         INSERT INTO erc20_transaction_logs (value, symbol, from_address, to_address, block_number, transaction_hash)

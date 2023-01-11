@@ -5,7 +5,7 @@ CREATE TABLE
         id SERIAL PRIMARY KEY,
         transaction_hash TEXT NOT NULL,
         block_number INTEGER NOT NULL,
-        symbol TEXT NOT NULL,
+        symbol bytea NOT NULL,
         value DECIMAL(30,10) NOT NULL,
         to_address TEXT NOT NULL,
         from_address TEXT NOT NULL,
